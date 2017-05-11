@@ -5,13 +5,13 @@ CTA模块相关的GUI控制组件
 '''
 
 
-from uiBasicWidget import QtGui, QtCore, BasicCell
+from uiBasicWidget import QtGui, QtCore, BasicCell, QtWidgets
 from eventEngine import *
 from language import text
 
 
 ########################################################################
-class CtaValueMonitor(QtGui.QTableWidget):
+class CtaValueMonitor(QtWidgets.QTableWidget):
     """参数监控"""
 
     #----------------------------------------------------------------------
@@ -56,7 +56,7 @@ class CtaValueMonitor(QtGui.QTableWidget):
 
 
 ########################################################################
-class CtaStrategyManager(QtGui.QGroupBox):
+class CtaStrategyManager(QtWidgets.QGroupBox):
     """策略管理组件"""
     signal = QtCore.pyqtSignal(type(Event()))
 
@@ -145,7 +145,7 @@ class CtaStrategyManager(QtGui.QGroupBox):
 
 
 ########################################################################
-class CtaEngineManager(QtGui.QWidget):
+class CtaEngineManager(QtWidgets.QWidget):
     """CTA引擎管理组件"""
     signal = QtCore.pyqtSignal(type(Event()))
 

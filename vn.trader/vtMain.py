@@ -29,7 +29,7 @@ def main():
         ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID('vn.trader')  
     
     # 初始化Qt应用对象
-    app = QtGui.QApplication(sys.argv)
+    app = QtWidgets.QApplication(sys.argv)
     app.setWindowIcon(QtGui.QIcon(ICON_FILENAME))
     app.setFont(BASIC_FONT)
     
