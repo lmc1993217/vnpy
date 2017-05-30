@@ -8,37 +8,48 @@ from datetime import time
 
 from ctaBase import *
 from ctaTemplate import CtaTemplate
+import numpy as np
+import talib
 
 
 ########################################################################
-class DualThrustStrategy(CtaTemplate):
+class MACDStrategy(CtaTemplate):
     """DualThrust交易策略"""
-    className = 'DualThrustStrategy'
-    author = u'用Python的交易员'
+    className = 'MACDStrategy'
+    author = u'Lizard'
 
     # 策略参数
-    fixedSize = 100
-    k1 = 0.4
-    k2 = 0.6
+    atrLength = 22  # 计算ATR指标的窗口数
+    atrMaLength = 10  # 计算ATR均线的窗口数
+    rsiLength = 5  # 计算RSI的窗口数
+    rsiEntry = 16  # RSI的开仓信号
+    trailingPercent = 5  # 百分比移动止损
+    initDays = 10  # 初始化数据所用的天数
+    fixedSize = 1  # 每次交易的数量
 
-    initDays = 10
-
+    L1 = 50  # 第一个均线参数
+    L2 = 120  # 第二个均线参数
+    fiveBar = None
     # 策略变量
     bar = None  # K线对象
     barMinute = EMPTY_STRING  # K线当前的分钟
-    barList = []  # K线对象的列表
 
-    dayOpen = 0
-    dayHigh = 0
-    dayLow = 0
+    bufferSize = 150  # 需要缓存的数据的大小
+    bufferCount = 0  # 目前已经缓存了的数据的计数
+    highArray = np.zeros(bufferSize)  # K线最高价的数组
+    lowArray = np.zeros(bufferSize)  # K线最低价的数组
+    closeArray = np.zeros(bufferSize)  # K线收盘价的数组
 
-    range = 0
-    longEntry = 0
-    shortEntry = 0
-    exitTime = time(hour=14, minute=55)
+    atrCount = 0  # 目前已经缓存了的ATR的计数
+    atrArray = np.zeros(bufferSize)  # ATR指标的数组
+    atrValue = 0  # 最新的ATR指标数值
+    atrMa = 0  # ATR移动平均的数值
 
-    longEntered = False
-    shortEntered = False
+    rsiValue = 0  # RSI指标的数值
+    rsiBuy = 0  # RSI买开阈值
+    rsiSell = 0  # RSI卖开阈值
+    intraTradeHigh = 0  # 移动止损用的持仓期内最高价
+    intraTradeLow = 0  # 移动止损用的持仓期内最低价
 
     orderList = []  # 保存委托代码的列表
 
@@ -47,22 +58,28 @@ class DualThrustStrategy(CtaTemplate):
                  'className',
                  'author',
                  'vtSymbol',
-                 'k1',
-                 'k2']
+                 'atrLength',
+                 'atrMaLength',
+                 'rsiLength',
+                 'rsiEntry',
+                 'trailingPercent',
+                 'L1',
+                 'L2']
 
     # 变量列表，保存了变量的名称
     varList = ['inited',
                'trading',
                'pos',
-               'range',
-               'longEntry',
-               'shortEntry',
-               'exitTime']
+               'atrValue',
+               'atrMa',
+               'rsiValue',
+               'rsiBuy',
+               'rsiSell']
 
     # ----------------------------------------------------------------------
     def __init__(self, ctaEngine, setting):
         """Constructor"""
-        super(DualThrustStrategy, self).__init__(ctaEngine, setting)
+        super(MACDStrategy, self).__init__(ctaEngine, setting)
 
         self.barList = []
 
@@ -70,7 +87,8 @@ class DualThrustStrategy(CtaTemplate):
     def onInit(self):
         """初始化策略（必须由用户继承实现）"""
         self.writeCtaLog(u'%s策略初始化' % self.name)
-
+        self.barConut = 0
+        self.includeMin = 0
         # 载入历史数据，并采用回放计算的方式初始化策略数值
         initData = self.loadBar(self.initDays)
         for bar in initData:
@@ -126,89 +144,117 @@ class DualThrustStrategy(CtaTemplate):
     # ----------------------------------------------------------------------
     def onBar(self, bar):
         """收到Bar推送（必须由用户继承实现）"""
+        # 如果当前是一个5分钟走完
+        if bar.datetime.minute == 0:
+        #if self.includeMin >= 240:
+            # 如果已经有聚合5分钟K线
+            if self.fiveBar:
+                # 将最新分钟的数据更新到目前5分钟线中
+                fiveBar = self.fiveBar
+                fiveBar.high = max(fiveBar.high, bar.high)
+                fiveBar.low = min(fiveBar.low, bar.low)
+                fiveBar.close = bar.close
+                self.includeMin +=1
+                # 推送5分钟线数据
+                self.onFiveBar(fiveBar)
+
+                # 清空5分钟线数据缓存
+                self.fiveBar = None
+                self.includeMin = 0
+        else:
+            # 如果没有缓存则新建
+            if not self.fiveBar:
+                fiveBar = CtaBarData()
+
+                fiveBar.vtSymbol = bar.vtSymbol
+                fiveBar.symbol = bar.symbol
+                fiveBar.exchange = bar.exchange
+
+                fiveBar.open = bar.open
+                fiveBar.high = bar.high
+                fiveBar.low = bar.low
+                fiveBar.close = bar.close
+
+                fiveBar.date = bar.date
+                fiveBar.time = bar.time
+                fiveBar.datetime = bar.datetime
+
+                self.fiveBar = fiveBar
+
+            else:
+                fiveBar = self.fiveBar
+                fiveBar.high = max(fiveBar.high, bar.high)
+                fiveBar.low = min(fiveBar.low, bar.low)
+                fiveBar.close = bar.close
+                self.includeMin += 1
+
+    def onFiveBar(self, bar):
+        """收到Bar推送（必须由用户继承实现）"""
         # 撤销之前发出的尚未成交的委托（包括限价单和停止单）
         for orderID in self.orderList:
             self.cancelOrder(orderID)
         self.orderList = []
 
+        # 保存K线数据
+        self.closeArray[0:self.bufferSize - 1] = self.closeArray[1:self.bufferSize]
+        self.highArray[0:self.bufferSize - 1] = self.highArray[1:self.bufferSize]
+        self.lowArray[0:self.bufferSize - 1] = self.lowArray[1:self.bufferSize]
+
+        self.closeArray[-1] = bar.close
+        self.highArray[-1] = bar.high
+        self.lowArray[-1] = bar.low
+
+        self.bufferCount += 1
+        if self.bufferCount < self.bufferSize:
+            return
+
         # 计算指标数值
-        self.barList.append(bar)
+        self.MACDValue, self.avgMACDValue, self.MACDDiffValue, = talib.MACD(self.closeArray, fastperiod=12,
+                                                                            slowperiod=26, signalperiod=9)
+        self.MA1 = talib.MA(self.closeArray, timeperiod=self.L1)
+        self.MA2 = talib.MA(self.closeArray, timeperiod=self.L2)
 
-        if len(self.barList) <= 2:
-            return
-        else:
-            self.barList.pop(0)
-        lastBar = self.barList[-2]
+        # 判断是否要进行交易
 
-        # 新的一天
-        if lastBar.datetime.date() != bar.datetime.date():
-            # 如果已经初始化
-            if self.dayHigh:
-                self.range = self.dayHigh - self.dayLow
-                self.longEntry = bar.open + self.k1 * self.range
-                self.shortEntry = bar.open - self.k2 * self.range
+        # 当前无仓位
+        if self.pos == 0:
+            self.intraTradeHigh = bar.high
+            self.intraTradeLow = bar.low
 
-            self.dayOpen = bar.open
-            self.dayHigh = bar.high
-            self.dayLow = bar.low
+            if self.MACDValue[-1] > 0 and self.MA1[-1] > self.MA2[-1] and self.MACDDiffValue[-1] > 0 and \
+                            self.closeArray[-1] > self.MA1[-1] and self.closeArray[-1] > self.MA2[-1]:
+                self.buy(bar.close, self.fixedSize)
+            elif self.MACDValue[-1] < 0 and self.MA1[-1] < self.MA2[-1] and self.MACDDiffValue[-1] < 0 and \
+                            self.closeArray[-1] < self.MA1[-1] and self.closeArray[-1] < self.MA2[-1]:
+                self.short(bar.close, self.fixedSize)
 
-            self.longEntered = False
-            self.shortEntered = False
-        else:
-            self.dayHigh = max(self.dayHigh, bar.high)
-            self.dayLow = min(self.dayLow, bar.low)
+        # 持有多头仓位
+        elif self.pos > 0:
+            if self.MACDValue[-1] < 0 and self.MA1[-1] < self.MA2[-1]:
+                self.sell(bar.close, self.fixedSize)
+            else:
+                # 计算多头持有期内的最高价，以及重置最低价
+                self.intraTradeHigh = max(self.intraTradeHigh, bar.high)
+                self.intraTradeLow = bar.low
+                # 计算多头移动止损
+                longStop = self.intraTradeHigh * (1 - self.trailingPercent / 100)
+                # 发出本地止损委托，并且把委托号记录下来，用于后续撤单
+                orderID = self.sell(longStop, abs(self.pos), stop=True)
+                self.orderList.append(orderID)
 
-        # 尚未到收盘
-        if not self.range:
-            return
+        # 持有空头仓位
+        elif self.pos < 0:
+            if self.MACDValue[-1] > 0 and self.MA1[-1] > self.MA2[-1]:
+                self.cover(bar.close, self.fixedSize)
+            else:
+                self.intraTradeLow = min(self.intraTradeLow, bar.low)
+                self.intraTradeHigh = bar.high
 
-        if bar.datetime.time() < self.exitTime:
-            if self.pos == 0:
-                if bar.close > self.dayOpen:
-                    if not self.longEntered:
-                        vtOrderID = self.buy(self.longEntry, self.fixedSize, stop=True)
-                        self.orderList.append(vtOrderID)
-                else:
-                    if not self.shortEntered:
-                        vtOrderID = self.short(self.shortEntry, self.fixedSize, stop=True)
-                        self.orderList.append(vtOrderID)
+                shortStop = self.intraTradeLow * (1 + self.trailingPercent / 100)
+                orderID = self.cover(shortStop, abs(self.pos), stop=True)
+                self.orderList.append(orderID)
 
-            # 持有多头仓位
-            elif self.pos > 0:
-                self.longEntered = True
-
-                # 多头止损单
-                vtOrderID = self.sell(self.shortEntry, self.fixedSize, stop=True)
-                self.orderList.append(vtOrderID)
-
-                # 空头开仓单
-                if not self.shortEntered:
-                    vtOrderID = self.short(self.shortEntry, self.fixedSize, stop=True)
-                    self.orderList.append(vtOrderID)
-
-            # 持有空头仓位
-            elif self.pos < 0:
-                self.shortEntered = True
-
-                # 空头止损单
-                vtOrderID = self.cover(self.longEntry, self.fixedSize, stop=True)
-                self.orderList.append(vtOrderID)
-
-                # 多头开仓单
-                if not self.longEntered:
-                    vtOrderID = self.buy(self.longEntry, self.fixedSize, stop=True)
-                    self.orderList.append(vtOrderID)
-
-                    # 收盘平仓
-        else:
-            if self.pos > 0:
-                vtOrderID = self.sell(bar.close * 0.99, abs(self.pos))
-                self.orderList.append(vtOrderID)
-            elif self.pos < 0:
-                vtOrderID = self.cover(bar.close * 1.01, abs(self.pos))
-                self.orderList.append(vtOrderID)
-
-                # 发出状态更新事件
+        # 发出状态更新事件
         self.putEvent()
 
     # ----------------------------------------------------------------------
@@ -248,7 +294,7 @@ if __name__ == '__main__':
     engine.setDatabase(MINUTE_DB_NAME, 'IF0000')
 
     # 在引擎中创建策略对象
-    engine.initStrategy(DualThrustStrategy, {})
+    engine.initStrategy(MACDStrategy, {})
 
     # 开始跑回测
     engine.runBacktesting()
